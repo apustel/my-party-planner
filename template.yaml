@@ -1,0 +1,171 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Globals:
+  Function:
+    Timeout: 300
+    Runtime: python3.10
+    Handler: app.lambda_handler
+    Environment:
+      Variables:
+        PARTIES_TABLE: !Ref PartiesTable
+        GUESTS_TABLE: !Ref GuestsTable
+        REPORTS_BUCKET: !Ref ReportsBucket
+
+Resources:
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+#    Properties:
+#      ObjectOwnership: BucketOwnerEnforced
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+#          - Effect: Allow
+#            Action: s3:GetObject
+#            Resource: !Sub "${FrontendBucket.Arn}/index.html"
+#            Principal: "*"
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+            Resource: !Sub "${FrontendBucket.Arn}/index.html"
+            Principal:
+              AWS: !GetAtt LambdaExecutionRole.Arn
+  
+  RegistrationApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: RegistrationApi
+      StageName: Prod
+      Cors:
+        AllowMethods: "'OPTIONS,POST'"
+        AllowHeaders: "'Content-Type'"
+        AllowOrigin: "'*'"
+
+  MyUploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: frontend/
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref FrontendBucket
+          REGISTRATION_API: !Ref RegistrationApi
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3WriteAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::${FrontendBucket}/*"
+        - PolicyName: CloudWatchLogsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*"
+
+  CustomS3Upload:
+    Type: Custom::S3Upload
+    Properties:
+      ServiceToken: !GetAtt MyUploadFunction.Arn
+
+  RegistrationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: registration/
+      Events:
+        register:
+          Type: Api
+          Properties:
+            Path: /register
+            Method: post
+            RestApiId: !Ref RegistrationApi
+      Policies:
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:PutItem
+              - dynamodb:GetItem
+            Resource:
+              - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PartiesTable}"
+              - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${GuestsTable}"
+
+  PartiesTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      PrimaryKey:
+        Name: PartyName
+        Type: String
+
+  GuestsTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      PrimaryKey:
+        Name: GuestName
+        Type: String
+
+  ReportsBucket:
+    Type: AWS::S3::Bucket
+
+  ReportingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: reporting/
+      Policies:
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:Scan
+            Resource:
+              - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PartiesTable}"
+              - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${GuestsTable}"
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:GetBucketAcl
+              - s3:PutObject
+            Resource:
+              - !GetAtt ReportsBucket.Arn
+              - !Sub "${ReportsBucket.Arn}/*"
+      Events:
+        scheduled:
+          Type: Schedule
+          Properties:
+            Schedule: "rate(1 day)"
+
+Outputs:
+  RegisterApi:
+    Value: !Sub "https://${RegistrationApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/register/"
+  RegisterFunction:
+    Value: !GetAtt RegistrationFunction.Arn
+  ReportingFunction:
+    Value: !GetAtt ReportingFunction.Arn
+  PartiesTable:
+    Value: !Ref PartiesTable
+  GuestsTable:
+    Value: !Ref GuestsTable
+  ReportsBucket:
+    Value: !Ref ReportsBucket
